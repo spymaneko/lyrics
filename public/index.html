@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Professional In-Video Lyric Studio Pro</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Cinzel:wght@700&family=Montserrat:wght@400;700;900&family=Orbitron:wght@600;900&family=Pacifico&family=Playfair+Display:ital,wght@0,700;1,400&family=Poppins:wght@600;800&family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="studio-container">
+    <header class="studio-header">
+      <h1>🎬 Lyric Video Studio Pro</h1>
+      <p>Professional WYSIWYG On-Screen Lyric Editor</p>
+    </header>
+
+    <!-- STEP 1: MEDIA UPLOAD -->
+    <div id="step-1" class="card">
+      <h2>Step 1: Choose Media Source</h2>
+
+      <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('url')">YouTube URL</button>
+        <button class="tab-btn" onclick="switchTab('video')">Video File</button>
+        <button class="tab-btn" onclick="switchTab('audio')">Audio File</button>
+      </div>
+
+      <form id="url-form" class="tab-content active" onsubmit="startTranscribe(event, 'url')">
+        <input type="url" id="yt-url" placeholder="https://www.youtube.com/watch?v=..." required />
+        <button type="submit" class="submit-btn">Auto-Transcribe Video</button>
+      </form>
+
+      <form id="video-form" class="tab-content" onsubmit="startTranscribe(event, 'video')">
+        <input type="file" name="video" accept="video/*" required />
+        <button type="submit" class="submit-btn">Upload & Transcribe Video</button>
+      </form>
+
+      <form id="audio-form" class="tab-content" onsubmit="startTranscribe(event, 'audio')">
+        <label>Audio Track (.mp3, .wav)</label>
+        <input type="file" name="audio" accept="audio/*" required />
+        <label>Optional Background Photo or Video</label>
+        <input type="file" name="background" accept="image/*,video/*" />
+        <button type="submit" class="submit-btn">Upload & Transcribe Audio</button>
+      </form>
+    </div>
+
+    <!-- STEP 2: COMPLETE IN-VIDEO CANVAS EDITOR -->
+    <div id="step-2" class="canvas-editor-wrapper hidden">
+      <div class="video-stage-container">
+        
+        <!-- IN-VIDEO FLOATING CONTROL SUITE -->
+        <div class="floating-invideo-bar">
+          <div class="toolbar-group">
+            <span class="toolbar-label">Font</span>
+            <select id="fontFamily" onchange="updateActiveLyricStyle()">
+              <option value="Montserrat" selected>Montserrat</option>
+              <option value="Bebas Neue">Bebas Neue</option>
+              <option value="Poppins">Poppins</option>
+              <option value="Orbitron">Orbitron</option>
+              <option value="Pacifico">Pacifico</option>
+              <option value="Cinzel">Cinzel</option>
+              <option value="Playfair Display">Playfair</option>
+              <option value="Roboto">Roboto</option>
+              <option value="Impact">Impact</option>
+            </select>
+          </div>
+
+          <div class="toolbar-group">
+            <span class="toolbar-label">Size</span>
+            <input type="number" id="fontSize" value="52" min="18" max="140" onchange="updateActiveLyricStyle()">
+          </div>
+
+          <div class="toolbar-group">
+            <span class="toolbar-label">Text Color</span>
+            <input type="color" id="textColor" value="#FFFFFF" onchange="updateActiveLyricStyle()">
+          </div>
+
+          <div class="toolbar-group">
+            <span class="toolbar-label">Outline</span>
+            <input type="color" id="outlineColor" value="#000000" onchange="updateActiveLyricStyle()">
+          </div>
+
+          <div class="toolbar-group">
+            <span class="toolbar-label">Effect</span>
+            <select id="transition" onchange="updateActiveLyricStyle()">
+              <option value="none">Standard Static</option>
+              <option value="fade">Smooth Fade In/Out</option>
+              <option value="pop">Bounce Pop In</option>
+              <option value="slideUp">Slide Up</option>
+              <option value="karaoke">Word-by-Word Karaoke</option>
+              <option value="glow">Neon Pulse Glow</option>
+            </select>
+          </div>
+
+          <div class="toolbar-group actions">
+            <button onclick="renderFinalVideo()" class="submit-btn export-btn">⚡ Export HD Video</button>
+          </div>
+        </div>
+
+        <!-- CANVAS DISPLAY -->
+        <div class="canvas-viewport">
+          <video id="hidden-video" class="hidden" crossorigin="anonymous"></video>
+          <canvas id="preview-canvas" width="1280" height="720"></canvas>
+          <div class="canvas-instructions">
+            <span>✋ Drag text to move & save position</span>
+            <span>💬 Double-click text to edit words</span>
+            <span>✂️ Split long line at cursor: Press 'S'</span>
+          </div>
+        </div>
+
+        <!-- IN-VIDEO PLAYER TIMELINE -->
+        <div class="invideo-player-bar">
+          <button id="play-pause-btn" onclick="togglePlay()" class="player-btn">▶ Play</button>
+          <span id="time-display" class="time-readout">00:00 / 00:00</span>
+          <input type="range" id="seek-bar" value="0" min="0" step="0.05" oninput="seekVideo(this.value)" class="seek-slider">
+          <button onclick="splitCurrentLyric()" class="split-btn" title="Split current line into two">✂️ Split Line</button>
+        </div>
+
+      </div>
+
+      <!-- IN-VIDEO COLLAPSIBLE TIMELINE LIST -->
+      <div class="invideo-lyrics-panel">
+        <div class="panel-header">
+          <h3>Lyric Lines & Timings</h3>
+          <span class="sub-count" id="lyric-count">0 Lines</span>
+        </div>
+        <div id="lyrics-editor" class="lyrics-scroll-list"></div>
+      </div>
+    </div>
+
+    <!-- STATUS & EXPORT -->
+    <div id="status-container" class="card hidden">
+      <div class="spinner"></div>
+      <p id="status-text">Processing transcription & auto-splitting sentences...</p>
+    </div>
+
+    <div id="error-container" class="hidden error-box"></div>
+
+    <div id="result-container" class="card hidden">
+      <h3>🎉 HD Lyric Video Complete!</h3>
+      <video id="output-video" controls></video>
+      <div class="result-actions">
+        <a id="download-btn" class="submit-btn export-btn" download>Download Video</a>
+        <button onclick="location.reload()" class="submit-btn secondary-btn">New Project</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
