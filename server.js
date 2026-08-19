@@ -131,8 +131,8 @@ app.post('/api/transcribe', upload.fields([
         start: seg.start,
         end: seg.end,
         text: seg.text.trim(),
-        x: 960, // Centered for 1920x1080 canvas
-        y: 960,
+        x: 960, // Standard center X position for 1080p
+        y: 960, // Standard lower-third Y position for 1080p
         words: segWords.map(w => ({ word: w.word.trim(), start: w.start, end: w.end }))
       };
     });
@@ -165,7 +165,7 @@ async function handleVideoRender(req, res) {
     const assPath = path.join(UPLOADS_DIR, `${jobId || 'temp'}.ass`);
 
     const fontName = styles?.fontFamily || 'Montserrat';
-    const fontSize = styles?.fontSize || 72; // Scaled up for 1080p HD resolution
+    const fontSize = styles?.fontSize || 72; // Scaled for 1080p Full HD
     const primaryColor = hexToASSColor(styles?.textColor, '&H00FFFFFF&');
     const outlineColor = hexToASSColor(styles?.outlineColor, '&H00000000&');
 
@@ -220,7 +220,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const mediaExt = path.extname(mediaPath).toLowerCase();
     const isAudioOnly = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'].includes(mediaExt);
 
-    // High-Quality 1080p FFmpeg Commands
     if (isAudioOnly) {
       if (bgPath && fs.existsSync(bgPath)) {
         const bgExt = path.extname(bgPath).toLowerCase();
