@@ -96,12 +96,60 @@ function hexToASSColor(hexStr, defaultHex = '&H00FFFFFF&') {
 
 function formatASSTime(seconds) {
   const date = new Date(null);
-  date.setMilliseconds(seconds * 1000);
+  date.setMilliseconds((seconds || 0) * 1000);
   const hours = String(date.getUTCHours());
   const minutes = String(date.getUTCMinutes()).padStart(2, '0');
   const secs = String(date.getUTCSeconds()).padStart(2, '0');
   const cs = String(Math.floor(date.getUTCMilliseconds() / 10)).padStart(2, '0');
   return `${hours}:${minutes}:${secs}.${cs}`;
+}
+
+// Merges fragmented Whisper timestamps into single fixed lyric sentences
+function combineIntoFixedLines(rawSegments) {
+  if (!rawSegments || rawSegments.length === 0) return [];
+
+  const merged = [];
+  let current = null;
+
+  for (const seg of rawSegments) {
+    const text = seg.text.trim();
+    if (!text) continue;
+
+    if (!current) {
+      current = {
+        start: seg.start,
+        end: seg.end,
+        text: text
+      };
+    } else {
+      const timeGap = seg.start - current.end;
+      const combinedLength = current.text.length + 1 + text.length;
+
+      // Group segments if pause is short (< 1.2s) and line length stays under 50 chars
+      if (timeGap < 1.2 && combinedLength <= 50) {
+        current.end = seg.end;
+        current.text += ` ${text}`;
+      } else {
+        merged.push(current);
+        current = {
+          start: seg.start,
+          end: seg.end,
+          text: text
+        };
+      }
+    }
+  }
+
+  if (current) merged.push(current);
+
+  return merged.map(line => ({
+    start: line.start,
+    end: line.end,
+    text: line.text,
+    x: 640,
+    y: 640,
+    words: [] // Keep empty to prevent word-by-word highlight triggers
+  }));
 }
 
 app.post('/api/transcribe', upload.fields([
@@ -148,26 +196,14 @@ app.post('/api/transcribe', upload.fields([
       return res.status(400).json({ success: false, error: 'No media input provided.' });
     }
 
-    // Fast Groq Whisper Turbo transcription model
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(mediaFilePath),
       model: "whisper-large-v3-turbo",
       response_format: "verbose_json",
-      timestamp_granularities: ["segment", "word"]
+      timestamp_granularities: ["segment"]
     });
-    const allWords = transcription.words || [];
 
-    const segments = (transcription.segments || []).map(seg => {
-      const segWords = allWords.filter(w => w.start >= seg.start && w.end <= seg.end);
-      return {
-        start: seg.start,
-        end: seg.end,
-        text: seg.text.trim(),
-        x: 640,
-        y: 640,
-        words: segWords.map(w => ({ word: w.word.trim(), start: w.start, end: w.end }))
-      };
-    });
+    const segments = combineIntoFixedLines(transcription.segments || []);
 
     return res.json({ 
       success: true, 
@@ -203,7 +239,7 @@ async function handleVideoRender(req, res) {
     const outlineColor = hexToASSColor(styles?.outlineColor, '&H00000000&');
 
     let assContent = `[Script Info]
-Title: Lyric Studio Professional
+Title: Lyric Studio Fixed
 ScriptType: v4.00+
 WrapStyle: 0
 PlayResX: 1280
@@ -212,7 +248,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,${fontName},${fontSize},${primaryColor},&H000000FF&,${outlineColor},&H80000000&,1,0,0,0,100,100,0,0,1,3,0,5,10,10,10,1
+Style: Default,${fontName},${fontSize},${primaryColor},&H000000FF&,${outlineColor},&H80000000&,1,0,0,0,100,100,0,0,1,3,0,2,10,10,20,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -232,15 +268,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if (sub.textColor || styles?.textColor) overrideTags += `\\c${hexToASSColor(sub.textColor || styles.textColor)}`;
         if (sub.outlineColor || styles?.outlineColor) overrideTags += `\\3c${hexToASSColor(sub.outlineColor || styles.outlineColor)}`;
 
-        const currentTransition = sub.transition || styles?.transition;
-        if (currentTransition === 'fade') {
-          overrideTags += `\\fad(300,300)`;
-        } else if (currentTransition === 'pop') {
-          overrideTags += `\\t(0,200,\\fscx100\\fscy100)`;
-        } else if (currentTransition === 'karaoke' && sub.words && sub.words.length > 0) {
-          dialogueText = sub.words.map(w => `{\\k${Math.max(10, Math.round((w.end - w.start) * 100))}}${w.word}`).join(' ');
-        }
-
+        // Render completely static text without color sweeps or animations
         assContent += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,{${overrideTags}}${dialogueText}\n`;
       });
     }
@@ -278,7 +306,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   }
 }
 
-// Bind rendering logic to both endpoints
 app.post('/api/export', handleVideoRender);
 app.post('/api/render', handleVideoRender);
 
