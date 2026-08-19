@@ -28,7 +28,6 @@ await fs.ensureDir(UPLOADS_DIR);
 await fs.ensureDir(OUTPUTS_DIR);
 await fs.ensureDir(PUBLIC_DIR);
 
-// Robust CORS Configuration
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -41,9 +40,8 @@ app.use(express.static(PUBLIC_DIR));
 app.use('/outputs', express.static(OUTPUTS_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// Automatic storage cleanup for Render free tier memory & disk limits
-const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const FILE_MAX_AGE_MS = 60 * 60 * 1000;      // 1 hour
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const FILE_MAX_AGE_MS = 60 * 60 * 1000;
 
 async function cleanOldFiles(dirPath) {
   try {
@@ -68,7 +66,6 @@ setInterval(() => {
   cleanOldFiles(OUTPUTS_DIR);
 }, CLEANUP_INTERVAL_MS);
 
-// Health check endpoint to wake up Render instance
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: Date.now() });
 });
@@ -104,7 +101,6 @@ function formatASSTime(seconds) {
   return `${hours}:${minutes}:${secs}.${cs}`;
 }
 
-// Merges fragmented Whisper timestamps into single fixed lyric sentences
 function combineIntoFixedLines(rawSegments) {
   if (!rawSegments || rawSegments.length === 0) return [];
 
@@ -125,7 +121,6 @@ function combineIntoFixedLines(rawSegments) {
       const timeGap = seg.start - current.end;
       const combinedLength = current.text.length + 1 + text.length;
 
-      // Group segments if pause is short (< 1.2s) and line length stays under 50 chars
       if (timeGap < 1.2 && combinedLength <= 50) {
         current.end = seg.end;
         current.text += ` ${text}`;
@@ -148,7 +143,7 @@ function combineIntoFixedLines(rawSegments) {
     text: line.text,
     x: 640,
     y: 640,
-    words: [] // Keep empty to prevent word-by-word highlight triggers
+    words: []
   }));
 }
 
@@ -220,8 +215,12 @@ app.post('/api/transcribe', upload.fields([
   }
 });
 
-// Video Rendering Logic
+// Fast Video Rendering Logic
 async function handleVideoRender(req, res) {
+  // Prevent socket connection timeout during long FFmpeg execution
+  req.setTimeout(0);
+  res.setTimeout(0);
+
   try {
     const { jobId, mediaPath, bgPath, subtitles, styles } = req.body;
 
@@ -268,13 +267,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if (sub.textColor || styles?.textColor) overrideTags += `\\c${hexToASSColor(sub.textColor || styles.textColor)}`;
         if (sub.outlineColor || styles?.outlineColor) overrideTags += `\\3c${hexToASSColor(sub.outlineColor || styles.outlineColor)}`;
 
-        // Render completely static text without color sweeps or animations
         assContent += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,{${overrideTags}}${dialogueText}\n`;
       });
     }
 
     await fs.writeFile(assPath, assContent, 'utf8');
-    const escapedAssPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+
+    // Properly escape file path for FFmpeg ASS filter string across Linux & Windows
+    const escapedAssPath = assPath.replace(/\\/g, '/').replace(/'/g, "'\\''").replace(/:/g, '\\:');
 
     let ffmpegCmd = '';
     const mediaExt = path.extname(mediaPath).toLowerCase();
@@ -286,18 +286,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         const isBgVideo = ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(bgExt);
 
         if (isBgVideo) {
-          ffmpegCmd = `ffmpeg -threads 1 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 0 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         } else {
-          ffmpegCmd = `ffmpeg -threads 1 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 0 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         }
       } else {
-        ffmpegCmd = `ffmpeg -threads 1 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+        ffmpegCmd = `ffmpeg -threads 0 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
       }
     } else {
-      ffmpegCmd = `ffmpeg -threads 1 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -crf 28 -c:a copy "${outputPath}" -y`;
+      ffmpegCmd = `ffmpeg -threads 0 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -crf 28 -c:a copy "${outputPath}" -y`;
     }
 
-    await execPromise(ffmpegCmd);
+    // Execute FFmpeg with higher maxBuffer size to prevent child process overflow
+    await execPromise(ffmpegCmd, { maxBuffer: 1024 * 1024 * 50 });
+
     return res.json({ success: true, downloadUrl: `/outputs/${outputFilename}` });
 
   } catch (error) {
@@ -313,5 +315,5 @@ const server = app.listen(PORT, () => {
   console.log(`🚀 Professional Lyric Studio running on http://localhost:${PORT}`);
 });
 
-server.keepAliveTimeout = 300000;
-server.headersTimeout = 305000;
+server.keepAliveTimeout = 600000;
+server.headersTimeout = 605000;
