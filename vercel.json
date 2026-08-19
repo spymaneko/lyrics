@@ -1,9 +1,6 @@
 {
   "outputDirectory": "public",
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/$1"
-    }
-  ]
+  "buildCommand": null,
+  "devCommand": null,
+  "installCommand": "echo 'Skipping install on Vercel'"
 }
