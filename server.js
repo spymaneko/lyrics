@@ -6,6 +6,7 @@ import { promisify } from 'util';
 import path from 'path';
 import fs from 'fs-extra';
 import { fileURLToPath } from 'url';
+import OpenAI from 'openai';
 
 const execPromise = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
@@ -13,6 +14,11 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const OUTPUTS_DIR = path.join(__dirname, 'outputs');
@@ -103,26 +109,27 @@ app.post('/api/transcribe', upload.fields([
       return res.status(400).json({ success: false, error: 'No media input provided.' });
     }
 
-    const whisperOutDir = path.join(jobDir, 'whisper_out');
-    await fs.ensureDir(whisperOutDir);
+    // OpenAI Whisper API Transcription
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(mediaFilePath),
+      model: "whisper-1",
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment", "word"]
+    });
 
-    // Run Whisper using auto-detect
-    await execPromise(`whisper "${mediaFilePath}" --model base --output_format json --word_timestamps True --output_dir "${whisperOutDir}"`);
+    const allWords = transcription.words || [];
 
-    const jsonFiles = await fs.readdir(whisperOutDir);
-    const resultJson = jsonFiles.find(f => f.endsWith('.json'));
-    if (!resultJson) throw new Error('Whisper transcription failed.');
-
-    const whisperData = await fs.readJson(path.join(whisperOutDir, resultJson));
-
-    const segments = (whisperData.segments || []).map(seg => ({
-      start: seg.start,
-      end: seg.end,
-      text: seg.text.trim(),
-      x: 640,
-      y: 640,
-      words: (seg.words || []).map(w => ({ word: w.word.trim(), start: w.start, end: w.end }))
-    }));
+    const segments = (transcription.segments || []).map(seg => {
+      const segWords = allWords.filter(w => w.start >= seg.start && w.end <= seg.end);
+      return {
+        start: seg.start,
+        end: seg.end,
+        text: seg.text.trim(),
+        x: 640,
+        y: 640,
+        words: segWords.map(w => ({ word: w.word.trim(), start: w.start, end: w.end }))
+      };
+    });
 
     return res.json({ 
       success: true, 
@@ -205,18 +212,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         const isBgVideo = ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(bgExt);
 
         if (isBgVideo) {
-          // Video background: Use visual from background (0:v:0), audio from uploaded song (1:a:0)
           ffmpegCmd = `ffmpeg -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset fast -crf 18 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         } else {
-          // Photo background: Loop image as video, audio from uploaded song (1:a:0)
           ffmpegCmd = `ffmpeg -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         }
       } else {
-        // Black background fallback
         ffmpegCmd = `ffmpeg -f lavfi -i color=c=black:s=1280x720:r=30 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
       }
     } else {
-      // Input is a video file with audio
       ffmpegCmd = `ffmpeg -i "${mediaPath}" -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset fast -crf 18 -c:a copy "${outputPath}" -y`;
     }
 
