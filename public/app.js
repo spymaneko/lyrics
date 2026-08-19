@@ -510,6 +510,14 @@ async function renderFinalVideo() {
   statusContainer.classList.remove('hidden');
   errorContainer.classList.add('hidden');
 
+  // Verify session integrity before sending payload
+  if (!currentSession.mediaPath || !currentSession.subtitles || currentSession.subtitles.length === 0) {
+    statusContainer.classList.add('hidden');
+    errorContainer.textContent = 'Session data missing. Please re-transcribe your track.';
+    errorContainer.classList.remove('hidden');
+    return;
+  }
+
   const styles = {
     fontFamily: document.getElementById('fontFamily').value,
     fontSize: parseInt(document.getElementById('fontSize').value),
@@ -519,11 +527,17 @@ async function renderFinalVideo() {
   };
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5-minute timeout window
+
     const response = await fetch(`${BACKEND_URL}/api/render`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...currentSession, styles })
+      body: JSON.stringify({ ...currentSession, styles }),
+      signal: controller.signal
     });
+
+    clearTimeout(timeoutId);
 
     const result = await response.json();
     if (!response.ok || !result.success) throw new Error(result.error || 'Video render failed.');
@@ -535,7 +549,11 @@ async function renderFinalVideo() {
     step2.classList.add('hidden');
     resultContainer.classList.remove('hidden');
   } catch (err) {
-    errorContainer.textContent = err.message;
+    if (err.name === 'AbortError') {
+      errorContainer.textContent = 'Render request timed out. Processing heavy videos on free servers takes longer—try again or use a shorter clip.';
+    } else {
+      errorContainer.textContent = `Render Connection Failed (${err.message}). Ensure your Render backend service is awake.`;
+    }
     errorContainer.classList.remove('hidden');
   } finally {
     statusContainer.classList.add('hidden');
