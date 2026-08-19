@@ -1,4 +1,4 @@
-const BACKEND_URL = 'https://lyric-studio-backend.onrender.com'; //
+const BACKEND_URL = 'https://lyric-studio-backend.onrender.com';
 
 // Helper function to turn relative backend paths into full absolute URLs
 const getFullUrl = (url) => {
@@ -510,7 +510,7 @@ function highlightActiveLyricRow() {
   }
 }
 
-// Client-Side Canvas Stream Recording (Prevents Render FFmpeg Timeouts / OOM Crashes)
+// Server-Side Export Request (Sends layout state to backend FFmpeg renderer)
 async function renderFinalVideo() {
   const statusContainer = document.getElementById('status-container');
   const errorContainer = document.getElementById('error-container');
@@ -520,75 +520,40 @@ async function renderFinalVideo() {
   statusContainer.classList.remove('hidden');
   errorContainer.classList.add('hidden');
 
+  const statusText = statusContainer.querySelector('p') || statusContainer;
+  statusText.textContent = 'Rendering video on server... Please wait.';
+
   try {
-    // 1. Reset video & background timeline to 0
-    videoEl.currentTime = 0;
-    if (bgVideoEl) bgVideoEl.currentTime = 0;
-
-    // 2. Capture real-time canvas stream (30 FPS)
-    const stream = canvasEl.captureStream(30);
-
-    // 3. Audio Node routing via Web Audio API for safe cross-domain stream capture
-    try {
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaElementSource(videoEl);
-      const dest = audioCtx.createMediaStreamDestination();
-      source.connect(dest);
-      source.connect(audioCtx.destination);
-      
-      const audioTrack = dest.stream.getAudioTracks()[0];
-      if (audioTrack) stream.addTrack(audioTrack);
-    } catch (aErr) {
-      console.warn('Fallback audio capture:', aErr.message);
-    }
-
-    // 4. Select standard web video container format
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-      ? 'video/webm;codecs=vp9,opus'
-      : 'video/webm';
-
-    const recorder = new MediaRecorder(stream, {
-      mimeType,
-      videoBitsPerSecond: 6000000 // High-definition 6 Mbps output
+    const response = await fetch(`${BACKEND_URL}/api/export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jobId: currentSession.jobId,
+        mediaPath: currentSession.mediaPath,
+        bgPath: currentSession.bgPath,
+        subtitles: currentSession.subtitles
+      })
     });
 
-    const recordedChunks = [];
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || 'Server rendering failed.');
+    }
 
-    recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) {
-        recordedChunks.push(e.data);
-      }
-    };
+    const fullDownloadUrl = getFullUrl(data.downloadUrl);
+    document.getElementById('output-video').src = fullDownloadUrl;
 
-    recorder.onstop = () => {
-      const blob = new Blob(recordedChunks, { type: 'video/webm' });
-      const exportUrl = URL.createObjectURL(blob);
+    const downloadBtn = document.getElementById('download-btn');
+    downloadBtn.href = fullDownloadUrl;
+    downloadBtn.download = `lyric_studio_export_${Date.now()}.mp4`;
 
-      document.getElementById('output-video').src = exportUrl;
-      const downloadBtn = document.getElementById('download-btn');
-      downloadBtn.href = exportUrl;
-      downloadBtn.download = `lyric_studio_export_${Date.now()}.webm`;
-
-      statusContainer.classList.add('hidden');
-      step2.classList.add('hidden');
-      resultContainer.classList.remove('hidden');
-    };
-
-    // 5. Start real-time stream recording
-    recorder.start();
-    await videoEl.play();
-    if (bgVideoEl) await bgVideoEl.play();
-
-    // 6. Stop recording automatically when video finishes playback
-    videoEl.onended = () => {
-      if (recorder.state !== 'inactive') {
-        recorder.stop();
-      }
-    };
+    statusContainer.classList.add('hidden');
+    step2.classList.add('hidden');
+    resultContainer.classList.remove('hidden');
 
   } catch (err) {
     statusContainer.classList.add('hidden');
-    errorContainer.textContent = `Client-side Export Error: ${err.message}`;
+    errorContainer.textContent = `Export Error: ${err.message}`;
     errorContainer.classList.remove('hidden');
   }
 }

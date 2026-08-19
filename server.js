@@ -183,7 +183,8 @@ app.post('/api/transcribe', upload.fields([
   }
 });
 
-app.post('/api/render', async (req, res) => {
+// Shared Rendering Handler function
+async function handleVideoRender(req, res) {
   try {
     const { jobId, mediaPath, bgPath, subtitles, styles } = req.body;
 
@@ -275,7 +276,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     console.error('Render Error:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
-});
+}
+
+// Bind rendering logic to both /api/export and /api/render
+app.post('/api/export', handleVideoRender);
+app.post('/api/render', handleVideoRender);
 
 const server = app.listen(PORT, () => {
   console.log(`🚀 Professional Lyric Studio running on http://localhost:${PORT}`);
