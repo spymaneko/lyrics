@@ -220,7 +220,7 @@ app.post('/api/transcribe', upload.fields([
   }
 });
 
-// Video Rendering Logic
+// Optimized Fast Video Rendering Logic
 async function handleVideoRender(req, res) {
   try {
     const { jobId, mediaPath, bgPath, subtitles, styles } = req.body;
@@ -268,7 +268,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if (sub.textColor || styles?.textColor) overrideTags += `\\c${hexToASSColor(sub.textColor || styles.textColor)}`;
         if (sub.outlineColor || styles?.outlineColor) overrideTags += `\\3c${hexToASSColor(sub.outlineColor || styles.outlineColor)}`;
 
-        // Render completely static text without color sweeps or animations
         assContent += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,{${overrideTags}}${dialogueText}\n`;
       });
     }
@@ -280,21 +279,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const mediaExt = path.extname(mediaPath).toLowerCase();
     const isAudioOnly = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mpeg'].includes(mediaExt);
 
+    // Speed-Optimized FFmpeg Flags (-threads 0, -preset ultrafast, -tune fastdecode)
     if (isAudioOnly) {
       if (bgPath && fs.existsSync(bgPath)) {
         const bgExt = path.extname(bgPath).toLowerCase();
         const isBgVideo = ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(bgExt);
 
         if (isBgVideo) {
-          ffmpegCmd = `ffmpeg -threads 1 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 0 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune fastdecode -crf 30 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         } else {
-          ffmpegCmd = `ffmpeg -threads 1 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 0 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -crf 30 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         }
       } else {
-        ffmpegCmd = `ffmpeg -threads 1 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+        ffmpegCmd = `ffmpeg -threads 0 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune fastdecode -crf 30 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
       }
     } else {
-      ffmpegCmd = `ffmpeg -threads 1 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -crf 28 -c:a copy "${outputPath}" -y`;
+      ffmpegCmd = `ffmpeg -threads 0 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-ih)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -tune fastdecode -crf 30 -c:a copy "${outputPath}" -y`;
     }
 
     await execPromise(ffmpegCmd);
