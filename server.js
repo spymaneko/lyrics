@@ -28,8 +28,15 @@ await fs.ensureDir(UPLOADS_DIR);
 await fs.ensureDir(OUTPUTS_DIR);
 await fs.ensureDir(PUBLIC_DIR);
 
-app.use(cors());
-app.use(express.json());
+// Robust CORS Configuration
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.use(express.static(PUBLIC_DIR));
 app.use('/outputs', express.static(OUTPUTS_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
@@ -109,13 +116,12 @@ app.post('/api/transcribe', upload.fields([
       return res.status(400).json({ success: false, error: 'No media input provided.' });
     }
 
-    // New Groq Transcription call:
-const transcription = await openai.audio.transcriptions.create({
-  file: fs.createReadStream(mediaFilePath),
-  model: "whisper-large-v3",
-  response_format: "verbose_json",
-  timestamp_granularities: ["segment", "word"]
-});
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(mediaFilePath),
+      model: "whisper-large-v3",
+      response_format: "verbose_json",
+      timestamp_granularities: ["segment", "word"]
+    });
     const allWords = transcription.words || [];
 
     const segments = (transcription.segments || []).map(seg => {
@@ -148,14 +154,19 @@ const transcription = await openai.audio.transcriptions.create({
 app.post('/api/render', async (req, res) => {
   try {
     const { jobId, mediaPath, bgPath, subtitles, styles } = req.body;
+
+    if (!mediaPath || !fs.existsSync(mediaPath)) {
+      return res.status(400).json({ success: false, error: 'Source media file not found on server.' });
+    }
+
     const outputFilename = `render_${Date.now()}.mp4`;
     const outputPath = path.join(OUTPUTS_DIR, outputFilename);
     const assPath = path.join(UPLOADS_DIR, `${jobId || 'temp'}.ass`);
 
-    const fontName = styles.fontFamily || 'Montserrat';
-    const fontSize = styles.fontSize || 52;
-    const primaryColor = hexToASSColor(styles.textColor, '&H00FFFFFF&');
-    const outlineColor = hexToASSColor(styles.outlineColor, '&H00000000&');
+    const fontName = styles?.fontFamily || 'Montserrat';
+    const fontSize = styles?.fontSize || 52;
+    const primaryColor = hexToASSColor(styles?.textColor, '&H00FFFFFF&');
+    const outlineColor = hexToASSColor(styles?.outlineColor, '&H00000000&');
 
     let assContent = `[Script Info]
 Title: Lyric Studio Professional
@@ -173,30 +184,32 @@ Style: Default,${fontName},${fontSize},${primaryColor},&H000000FF&,${outlineColo
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-    subtitles.forEach((sub) => {
-      const startStr = formatASSTime(sub.start);
-      const endStr = formatASSTime(sub.end);
-      let dialogueText = sub.text.replace(/\n/g, '\\N');
+    if (Array.isArray(subtitles)) {
+      subtitles.forEach((sub) => {
+        const startStr = formatASSTime(sub.start);
+        const endStr = formatASSTime(sub.end);
+        let dialogueText = sub.text.replace(/\n/g, '\\N');
 
-      const posX = sub.x || 640;
-      const posY = sub.y || 640;
-      let overrideTags = `\\pos(${posX},${posY})`;
+        const posX = sub.x || 640;
+        const posY = sub.y || 640;
+        let overrideTags = `\\pos(${posX},${posY})`;
 
-      if (sub.fontFamily || styles.fontFamily) overrideTags += `\\fn${sub.fontFamily || styles.fontFamily}`;
-      if (sub.textColor || styles.textColor) overrideTags += `\\c${hexToASSColor(sub.textColor || styles.textColor)}`;
-      if (sub.outlineColor || styles.outlineColor) overrideTags += `\\3c${hexToASSColor(sub.outlineColor || styles.outlineColor)}`;
+        if (sub.fontFamily || styles?.fontFamily) overrideTags += `\\fn${sub.fontFamily || styles.fontFamily}`;
+        if (sub.textColor || styles?.textColor) overrideTags += `\\c${hexToASSColor(sub.textColor || styles.textColor)}`;
+        if (sub.outlineColor || styles?.outlineColor) overrideTags += `\\3c${hexToASSColor(sub.outlineColor || styles.outlineColor)}`;
 
-      const currentTransition = sub.transition || styles.transition;
-      if (currentTransition === 'fade') {
-        overrideTags += `\\fad(300,300)`;
-      } else if (currentTransition === 'pop') {
-        overrideTags += `\\t(0,200,\\fscx100\\fscy100)`;
-      } else if (currentTransition === 'karaoke' && sub.words && sub.words.length > 0) {
-        dialogueText = sub.words.map(w => `{\\k${Math.max(10, Math.round((w.end - w.start) * 100))}}${w.word}`).join(' ');
-      }
+        const currentTransition = sub.transition || styles?.transition;
+        if (currentTransition === 'fade') {
+          overrideTags += `\\fad(300,300)`;
+        } else if (currentTransition === 'pop') {
+          overrideTags += `\\t(0,200,\\fscx100\\fscy100)`;
+        } else if (currentTransition === 'karaoke' && sub.words && sub.words.length > 0) {
+          dialogueText = sub.words.map(w => `{\\k${Math.max(10, Math.round((w.end - w.start) * 100))}}${w.word}`).join(' ');
+        }
 
-      assContent += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,{${overrideTags}}${dialogueText}\n`;
-    });
+        assContent += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,{${overrideTags}}${dialogueText}\n`;
+      });
+    }
 
     await fs.writeFile(assPath, assContent, 'utf8');
     const escapedAssPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
@@ -205,21 +218,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const mediaExt = path.extname(mediaPath).toLowerCase();
     const isAudioOnly = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mpeg'].includes(mediaExt);
 
+    // Optimized FFmpeg Flags (-threads 2 -preset superfast -crf 22) to prevent OOM RAM Crashes on Render Free Tier
     if (isAudioOnly) {
       if (bgPath && fs.existsSync(bgPath)) {
         const bgExt = path.extname(bgPath).toLowerCase();
         const isBgVideo = ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(bgExt);
 
         if (isBgVideo) {
-          ffmpegCmd = `ffmpeg -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset fast -crf 18 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 2 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset superfast -crf 22 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         } else {
-          ffmpegCmd = `ffmpeg -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 2 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset superfast -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         }
       } else {
-        ffmpegCmd = `ffmpeg -f lavfi -i color=c=black:s=1280x720:r=30 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+        ffmpegCmd = `ffmpeg -threads 2 -f lavfi -i color=c=black:s=1280x720:r=30 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset superfast -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
       }
     } else {
-      ffmpegCmd = `ffmpeg -i "${mediaPath}" -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset fast -crf 18 -c:a copy "${outputPath}" -y`;
+      ffmpegCmd = `ffmpeg -threads 2 -i "${mediaPath}" -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset superfast -crf 22 -c:a copy "${outputPath}" -y`;
     }
 
     await execPromise(ffmpegCmd);
@@ -231,6 +245,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 Professional Lyric Studio running on http://localhost:${PORT}`);
 });
+
+// Extend socket timeout settings for long video renders
+server.keepAliveTimeout = 300000;
+server.headersTimeout = 305000;
