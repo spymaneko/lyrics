@@ -1,3 +1,5 @@
+const BACKEND_URL = 'https://lyric-studio-backend.onrender.com';
+
 let currentSession = {
   jobId: null,
   mediaPath: null,
@@ -93,13 +95,13 @@ async function startTranscribe(event, type) {
     let response;
     if (type === 'url') {
       const url = document.getElementById('yt-url').value;
-      response = await fetch('/api/transcribe', {
+      response = await fetch(`${BACKEND_URL}/api/transcribe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url })
       });
     } else {
-      response = await fetch('/api/transcribe', { method: 'POST', body: formData });
+      response = await fetch(`${BACKEND_URL}/api/transcribe`, { method: 'POST', body: formData });
     }
 
     const result = await response.json();
@@ -511,7 +513,7 @@ async function renderFinalVideo() {
   };
 
   try {
-    const response = await fetch('/api/render', {
+    const response = await fetch(`${BACKEND_URL}/api/render`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...currentSession, styles })
