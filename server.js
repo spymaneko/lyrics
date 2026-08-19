@@ -40,37 +40,6 @@ app.use(express.static(PUBLIC_DIR));
 app.use('/outputs', express.static(OUTPUTS_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// Automatic storage cleanup for disk files
-const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
-const FILE_MAX_AGE_MS = 60 * 60 * 1000;
-
-async function cleanOldFiles(dirPath) {
-  try {
-    const files = await fs.readdir(dirPath);
-    const now = Date.now();
-
-    for (const file of files) {
-      const filePath = path.join(dirPath, file);
-      const stats = await fs.stat(filePath);
-
-      if (now - stats.mtimeMs > FILE_MAX_AGE_MS) {
-        await fs.remove(filePath);
-      }
-    }
-  } catch (err) {
-    console.error(`Cleanup error in ${dirPath}:`, err.message);
-  }
-}
-
-setInterval(() => {
-  cleanOldFiles(UPLOADS_DIR);
-  cleanOldFiles(OUTPUTS_DIR);
-}, CLEANUP_INTERVAL_MS);
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: Date.now() });
-});
-
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
   filename: (req, file, cb) => {
@@ -93,8 +62,9 @@ function hexToASSColor(hexStr, defaultHex = '&H00FFFFFF&') {
 }
 
 function formatASSTime(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
   const date = new Date(null);
-  date.setMilliseconds((seconds || 0) * 1000);
+  date.setMilliseconds(s * 1000);
   const hours = String(date.getUTCHours());
   const minutes = String(date.getUTCMinutes()).padStart(2, '0');
   const secs = String(date.getUTCSeconds()).padStart(2, '0');
@@ -102,10 +72,11 @@ function formatASSTime(seconds) {
   return `${hours}:${minutes}:${secs}.${cs}`;
 }
 
-function combineIntoFixedLines(rawSegments) {
+// Groups short Whisper segments into natural lyric lines
+function groupSegmentsIntoFullLines(rawSegments, allWords) {
   if (!rawSegments || rawSegments.length === 0) return [];
 
-  const merged = [];
+  const grouped = [];
   let current = null;
 
   for (const seg of rawSegments) {
@@ -120,13 +91,14 @@ function combineIntoFixedLines(rawSegments) {
       };
     } else {
       const timeGap = seg.start - current.end;
-      const combinedLength = current.text.length + 1 + text.length;
+      const combinedCharLength = current.text.length + 1 + text.length;
 
-      if (timeGap < 1.2 && combinedLength <= 50) {
+      // Merge if pause is under 0.8s and line is under 45 characters (~8-10 words)
+      if (timeGap < 0.8 && combinedCharLength <= 45) {
         current.end = seg.end;
         current.text += ` ${text}`;
       } else {
-        merged.push(current);
+        grouped.push(current);
         current = {
           start: seg.start,
           end: seg.end,
@@ -136,16 +108,20 @@ function combineIntoFixedLines(rawSegments) {
     }
   }
 
-  if (current) merged.push(current);
+  if (current) grouped.push(current);
 
-  return merged.map(line => ({
-    start: line.start,
-    end: line.end,
-    text: line.text,
-    x: 640,
-    y: 640,
-    words: []
-  }));
+  // Map words and 1080p positioning coordinates back to each combined line
+  return grouped.map(line => {
+    const lineWords = allWords.filter(w => w.start >= line.start - 0.1 && w.end <= line.end + 0.1);
+    return {
+      start: line.start,
+      end: line.end,
+      text: line.text,
+      x: 960,
+      y: 960,
+      words: lineWords.map(w => ({ word: w.word.trim(), start: w.start, end: w.end }))
+    };
+  });
 }
 
 app.post('/api/transcribe', upload.fields([
@@ -189,17 +165,18 @@ app.post('/api/transcribe', upload.fields([
       mediaFilePath = audioPath;
       publicMediaUrl = `/uploads/${jobId}/${audioFile.filename}`;
     } else {
-      return res.status(400).json({ success: false, error: 'No media input provided.' });
+      return res.status(400).json({ success: false, error: 'No media file supplied.' });
     }
 
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(mediaFilePath),
       model: "whisper-large-v3-turbo",
       response_format: "verbose_json",
-      timestamp_granularities: ["segment"]
+      timestamp_granularities: ["segment", "word"]
     });
 
-    const segments = combineIntoFixedLines(transcription.segments || []);
+    const allWords = transcription.words || [];
+    const segments = groupSegmentsIntoFullLines(transcription.segments || [], allWords);
 
     return res.json({ 
       success: true, 
@@ -216,48 +193,34 @@ app.post('/api/transcribe', upload.fields([
   }
 });
 
-// In-Memory Asynchronous Job Tracker
-const exportJobs = new Map();
-
-// Periodic Job Tracker Memory Cleanup (Removes records > 1 hour old)
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, job] of exportJobs.entries()) {
-    if (job.timestamp && (now - job.timestamp > 60 * 60 * 1000)) {
-      exportJobs.delete(id);
-    }
-  }
-}, 15 * 60 * 1000);
-
-async function processVideoBackground(jobId, exportParams) {
+async function handleVideoRender(req, res) {
   try {
-    const { mediaPath, bgPath, subtitles, styles } = exportParams;
+    const { jobId, mediaPath, bgPath, subtitles, styles } = req.body;
 
     if (!mediaPath || !fs.existsSync(mediaPath)) {
-      exportJobs.set(jobId, { status: 'failed', error: 'Source media file not found on server.', timestamp: Date.now() });
-      return;
+      return res.status(400).json({ success: false, error: 'Source media not found.' });
     }
 
-    const outputFilename = `render_${jobId}.mp4`;
+    const outputFilename = `render_hd_${Date.now()}.mp4`;
     const outputPath = path.join(OUTPUTS_DIR, outputFilename);
-    const assPath = path.join(UPLOADS_DIR, `${jobId}.ass`);
+    const assPath = path.join(UPLOADS_DIR, `${jobId || 'temp'}.ass`);
 
     const fontName = styles?.fontFamily || 'Montserrat';
-    const fontSize = styles?.fontSize || 52;
+    const fontSize = styles?.fontSize || 72;
     const primaryColor = hexToASSColor(styles?.textColor, '&H00FFFFFF&');
     const outlineColor = hexToASSColor(styles?.outlineColor, '&H00000000&');
 
     let assContent = `[Script Info]
-Title: Lyric Studio Fixed
+Title: Lyric Studio HD
 ScriptType: v4.00+
 WrapStyle: 0
-PlayResX: 1280
-PlayResY: 720
+PlayResX: 1920
+PlayResY: 1080
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,${fontName},${fontSize},${primaryColor},&H000000FF&,${outlineColor},&H80000000&,1,0,0,0,100,100,0,0,1,3,0,2,10,10,20,1
+Style: Default,${fontName},${fontSize},${primaryColor},&H000000FF&,${outlineColor},&H80000000&,1,0,0,0,100,100,0,0,1,4,0,5,10,10,10,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -269,26 +232,34 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         const endStr = formatASSTime(sub.end);
         let dialogueText = sub.text.replace(/\n/g, '\\N');
 
-        const posX = sub.x || 640;
-        const posY = sub.y || 640;
+        const posX = sub.x || 960;
+        const posY = sub.y || 960;
         let overrideTags = `\\pos(${posX},${posY})`;
 
         if (sub.fontFamily || styles?.fontFamily) overrideTags += `\\fn${sub.fontFamily || styles.fontFamily}`;
         if (sub.textColor || styles?.textColor) overrideTags += `\\c${hexToASSColor(sub.textColor || styles.textColor)}`;
         if (sub.outlineColor || styles?.outlineColor) overrideTags += `\\3c${hexToASSColor(sub.outlineColor || styles.outlineColor)}`;
 
+        const currentTransition = sub.transition || styles?.transition;
+        if (currentTransition === 'karaoke' && sub.words && sub.words.length > 0) {
+          dialogueText = sub.words.map(w => {
+            const centiseconds = Math.max(1, Math.round((w.end - w.start) * 100));
+            return `{\\k${centiseconds}}${w.word}`;
+          }).join(' ');
+        } else if (currentTransition === 'fade') {
+          overrideTags += `\\fad(250,250)`;
+        }
+
         assContent += `Dialogue: 0,${startStr},${endStr},Default,,0,0,0,,{${overrideTags}}${dialogueText}\n`;
       });
     }
 
     await fs.writeFile(assPath, assContent, 'utf8');
-
-    // Escapes special path characters for FFmpeg's ASS filter on Linux/Windows
-    const escapedAssPath = assPath.replace(/\\/g, '/').replace(/'/g, "'\\''").replace(/:/g, '\\:');
+    const escapedAssPath = assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
 
     let ffmpegCmd = '';
     const mediaExt = path.extname(mediaPath).toLowerCase();
-    const isAudioOnly = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mpeg'].includes(mediaExt);
+    const isAudioOnly = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac'].includes(mediaExt);
 
     if (isAudioOnly) {
       if (bgPath && fs.existsSync(bgPath)) {
@@ -296,53 +267,29 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         const isBgVideo = ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(bgExt);
 
         if (isBgVideo) {
-          ffmpegCmd = `ffmpeg -threads 1 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         } else {
-          ffmpegCmd = `ffmpeg -threads 1 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset medium -tune stillimage -crf 18 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         }
       } else {
-        ffmpegCmd = `ffmpeg -threads 1 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+        ffmpegCmd = `ffmpeg -f lavfi -i color=c=black:s=1920x1080:r=30 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
       }
     } else {
-      ffmpegCmd = `ffmpeg -threads 1 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -crf 28 -c:a copy "${outputPath}" -y`;
+      ffmpegCmd = `ffmpeg -i "${mediaPath}" -vf "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset medium -crf 18 -c:a copy "${outputPath}" -y`;
     }
 
-    await execPromise(ffmpegCmd, { maxBuffer: 1024 * 1024 * 50 });
-    exportJobs.set(jobId, { status: 'completed', downloadUrl: `/outputs/${outputFilename}`, timestamp: Date.now() });
+    await execPromise(ffmpegCmd);
+    return res.json({ success: true, downloadUrl: `/outputs/${outputFilename}` });
 
   } catch (error) {
-    console.error(`Background Export Error for ${jobId}:`, error);
-    exportJobs.set(jobId, { status: 'failed', error: error.message, timestamp: Date.now() });
+    console.error('HD Render Error:', error);
+    return res.status(500).json({ success: false, error: error.message });
   }
-}
-
-// Initiate Non-Blocking Export Task
-function handleVideoRender(req, res) {
-  const jobId = `export_${Date.now()}`;
-  exportJobs.set(jobId, { status: 'processing', timestamp: Date.now() });
-
-  // Execute processing asynchronously in background
-  processVideoBackground(jobId, req.body);
-
-  // Return instant response to prevent gateway fetch timeout
-  return res.json({ success: true, jobId });
 }
 
 app.post('/api/export', handleVideoRender);
 app.post('/api/render', handleVideoRender);
 
-// Status Polling Endpoint
-app.get('/api/status/:jobId', (req, res) => {
-  const job = exportJobs.get(req.params.jobId);
-  if (!job) {
-    return res.status(404).json({ success: false, error: 'Job not found or expired.' });
-  }
-  return res.json({ success: true, ...job });
+app.listen(PORT, () => {
+  console.log(`🚀 HD Lyric Generator running on http://localhost:${PORT}`);
 });
-
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Professional Lyric Studio running on http://localhost:${PORT}`);
-});
-
-server.keepAliveTimeout = 600000;
-server.headersTimeout = 605000;
