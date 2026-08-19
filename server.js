@@ -72,6 +72,58 @@ function formatASSTime(seconds) {
   return `${hours}:${minutes}:${secs}.${cs}`;
 }
 
+// Groups short Whisper segments into natural lyric lines
+function groupSegmentsIntoFullLines(rawSegments, allWords) {
+  if (!rawSegments || rawSegments.length === 0) return [];
+
+  const grouped = [];
+  let current = null;
+
+  for (const seg of rawSegments) {
+    const text = seg.text.trim();
+    if (!text) continue;
+
+    if (!current) {
+      current = {
+        start: seg.start,
+        end: seg.end,
+        text: text
+      };
+    } else {
+      const timeGap = seg.start - current.end;
+      const combinedCharLength = current.text.length + 1 + text.length;
+
+      // Merge if pause is under 0.8s and line is under 45 characters (~8-10 words)
+      if (timeGap < 0.8 && combinedCharLength <= 45) {
+        current.end = seg.end;
+        current.text += ` ${text}`;
+      } else {
+        grouped.push(current);
+        current = {
+          start: seg.start,
+          end: seg.end,
+          text: text
+        };
+      }
+    }
+  }
+
+  if (current) grouped.push(current);
+
+  // Map words and 1080p positioning coordinates back to each combined line
+  return grouped.map(line => {
+    const lineWords = allWords.filter(w => w.start >= line.start - 0.1 && w.end <= line.end + 0.1);
+    return {
+      start: line.start,
+      end: line.end,
+      text: line.text,
+      x: 960,
+      y: 960,
+      words: lineWords.map(w => ({ word: w.word.trim(), start: w.start, end: w.end }))
+    };
+  });
+}
+
 app.post('/api/transcribe', upload.fields([
   { name: 'video', maxCount: 1 },
   { name: 'audio', maxCount: 1 },
@@ -124,18 +176,7 @@ app.post('/api/transcribe', upload.fields([
     });
 
     const allWords = transcription.words || [];
-
-    const segments = (transcription.segments || []).map(seg => {
-      const segWords = allWords.filter(w => w.start >= seg.start - 0.05 && w.end <= seg.end + 0.05);
-      return {
-        start: seg.start,
-        end: seg.end,
-        text: seg.text.trim(),
-        x: 960, // Standard center X position for 1080p
-        y: 960, // Standard lower-third Y position for 1080p
-        words: segWords.map(w => ({ word: w.word.trim(), start: w.start, end: w.end }))
-      };
-    });
+    const segments = groupSegmentsIntoFullLines(transcription.segments || [], allWords);
 
     return res.json({ 
       success: true, 
@@ -165,7 +206,7 @@ async function handleVideoRender(req, res) {
     const assPath = path.join(UPLOADS_DIR, `${jobId || 'temp'}.ass`);
 
     const fontName = styles?.fontFamily || 'Montserrat';
-    const fontSize = styles?.fontSize || 72; // Scaled for 1080p Full HD
+    const fontSize = styles?.fontSize || 72;
     const primaryColor = hexToASSColor(styles?.textColor, '&H00FFFFFF&');
     const outlineColor = hexToASSColor(styles?.outlineColor, '&H00000000&');
 
