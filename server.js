@@ -40,6 +40,7 @@ app.use(express.static(PUBLIC_DIR));
 app.use('/outputs', express.static(OUTPUTS_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
+// Automatic storage cleanup for disk/memory management
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const FILE_MAX_AGE_MS = 60 * 60 * 1000;
 
@@ -215,22 +216,21 @@ app.post('/api/transcribe', upload.fields([
   }
 });
 
-// Fast Video Rendering Logic
-async function handleVideoRender(req, res) {
-  // Prevent socket connection timeout during long FFmpeg execution
-  req.setTimeout(0);
-  res.setTimeout(0);
+// In-Memory Asynchronous Job Tracker
+const exportJobs = new Map();
 
+async function processVideoBackground(jobId, exportParams) {
   try {
-    const { jobId, mediaPath, bgPath, subtitles, styles } = req.body;
+    const { mediaPath, bgPath, subtitles, styles } = exportParams;
 
     if (!mediaPath || !fs.existsSync(mediaPath)) {
-      return res.status(400).json({ success: false, error: 'Source media file not found on server.' });
+      exportJobs.set(jobId, { status: 'failed', error: 'Source media file not found on server.' });
+      return;
     }
 
-    const outputFilename = `render_${Date.now()}.mp4`;
+    const outputFilename = `render_${jobId}.mp4`;
     const outputPath = path.join(OUTPUTS_DIR, outputFilename);
-    const assPath = path.join(UPLOADS_DIR, `${jobId || 'temp'}.ass`);
+    const assPath = path.join(UPLOADS_DIR, `${jobId}.ass`);
 
     const fontName = styles?.fontFamily || 'Montserrat';
     const fontSize = styles?.fontSize || 52;
@@ -273,7 +273,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     await fs.writeFile(assPath, assContent, 'utf8');
 
-    // Properly escape file path for FFmpeg ASS filter string across Linux & Windows
+    // Escapes special path characters for FFmpeg's ASS filter on Linux/Windows
     const escapedAssPath = assPath.replace(/\\/g, '/').replace(/'/g, "'\\''").replace(/:/g, '\\:');
 
     let ffmpegCmd = '';
@@ -286,30 +286,49 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         const isBgVideo = ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(bgExt);
 
         if (isBgVideo) {
-          ffmpegCmd = `ffmpeg -threads 0 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 1 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         } else {
-          ffmpegCmd = `ffmpeg -threads 0 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 1 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         }
       } else {
-        ffmpegCmd = `ffmpeg -threads 0 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+        ffmpegCmd = `ffmpeg -threads 1 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
       }
     } else {
-      ffmpegCmd = `ffmpeg -threads 0 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -crf 28 -c:a copy "${outputPath}" -y`;
+      ffmpegCmd = `ffmpeg -threads 1 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -crf 28 -c:a copy "${outputPath}" -y`;
     }
 
-    // Execute FFmpeg with higher maxBuffer size to prevent child process overflow
     await execPromise(ffmpegCmd, { maxBuffer: 1024 * 1024 * 50 });
-
-    return res.json({ success: true, downloadUrl: `/outputs/${outputFilename}` });
+    exportJobs.set(jobId, { status: 'completed', downloadUrl: `/outputs/${outputFilename}` });
 
   } catch (error) {
-    console.error('Render Error:', error);
-    return res.status(500).json({ success: false, error: error.message });
+    console.error(`Background Export Error for ${jobId}:`, error);
+    exportJobs.set(jobId, { status: 'failed', error: error.message });
   }
+}
+
+// Initiate Non-Blocking Export Task
+function handleVideoRender(req, res) {
+  const jobId = `export_${Date.now()}`;
+  exportJobs.set(jobId, { status: 'processing' });
+
+  // Execute processing asynchronously in background
+  processVideoBackground(jobId, req.body);
+
+  // Return instant response to prevent gateway fetch timeout
+  return res.json({ success: true, jobId });
 }
 
 app.post('/api/export', handleVideoRender);
 app.post('/api/render', handleVideoRender);
+
+// Status Polling Endpoint
+app.get('/api/status/:jobId', (req, res) => {
+  const job = exportJobs.get(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ success: false, error: 'Job not found or expired.' });
+  }
+  return res.json({ success: true, ...job });
+});
 
 const server = app.listen(PORT, () => {
   console.log(`🚀 Professional Lyric Studio running on http://localhost:${PORT}`);
