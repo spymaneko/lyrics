@@ -496,12 +496,11 @@ function renderLyricsList() {
   });
 }
 
-// Kept empty so playback no longer applies highlight borders or forces auto-scrolling
 function highlightActiveLyricRow() {
   // Static display mode active
 }
 
-// Server-Side Export Request (Sends layout state to backend FFmpeg renderer)
+// Asynchronous Server-Side Export with Polling
 async function renderFinalVideo() {
   const statusContainer = document.getElementById('status-container');
   const errorContainer = document.getElementById('error-container');
@@ -512,7 +511,7 @@ async function renderFinalVideo() {
   errorContainer.classList.add('hidden');
 
   const statusText = statusContainer.querySelector('p') || statusContainer;
-  statusText.textContent = 'Rendering video on server... Please wait.';
+  statusText.textContent = 'Initiating video render on server...';
 
   try {
     const response = await fetch(`${BACKEND_URL}/api/export`, {
@@ -528,19 +527,49 @@ async function renderFinalVideo() {
 
     const data = await response.json();
     if (!response.ok || !data.success) {
-      throw new Error(data.error || 'Server rendering failed.');
+      throw new Error(data.error || 'Failed to start export task.');
     }
 
-    const fullDownloadUrl = getFullUrl(data.downloadUrl);
-    document.getElementById('output-video').src = fullDownloadUrl;
+    const exportJobId = data.jobId;
+    statusText.textContent = 'Rendering video on server... Please wait (FFmpeg encoding in progress)';
 
-    const downloadBtn = document.getElementById('download-btn');
-    downloadBtn.href = fullDownloadUrl;
-    downloadBtn.download = `lyric_studio_export_${Date.now()}.mp4`;
+    // Poll the status endpoint every 3 seconds until finished or failed
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`${BACKEND_URL}/api/status/${exportJobId}`);
 
-    statusContainer.classList.add('hidden');
-    step2.classList.add('hidden');
-    resultContainer.classList.remove('hidden');
+        if (statusRes.status === 404) {
+          clearInterval(pollInterval);
+          throw new Error('Server restarted during rendering. Please try exporting again.');
+        }
+
+        const statusData = await statusRes.json();
+
+        if (statusData.status === 'completed') {
+          clearInterval(pollInterval);
+
+          const fullDownloadUrl = getFullUrl(statusData.downloadUrl);
+          document.getElementById('output-video').src = fullDownloadUrl;
+
+          const downloadBtn = document.getElementById('download-btn');
+          downloadBtn.href = fullDownloadUrl;
+          downloadBtn.download = `lyric_studio_export_${Date.now()}.mp4`;
+
+          statusContainer.classList.add('hidden');
+          step2.classList.add('hidden');
+          resultContainer.classList.remove('hidden');
+
+        } else if (statusData.status === 'failed') {
+          clearInterval(pollInterval);
+          throw new Error(statusData.error || 'Video render failed on server.');
+        }
+      } catch (pollErr) {
+        clearInterval(pollInterval);
+        statusContainer.classList.add('hidden');
+        errorContainer.textContent = `Export Error: ${pollErr.message}`;
+        errorContainer.classList.remove('hidden');
+      }
+    }, 3000);
 
   } catch (err) {
     statusContainer.classList.add('hidden');
