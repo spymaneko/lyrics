@@ -501,7 +501,9 @@ function highlightActiveLyricRow() {
   // Static display mode active
 }
 
-// Server-Side Export Request (Sends layout state to backend FFmpeg renderer)
+// =========================================================================
+// Asynchronous Export Handler (Job Queue + Status Polling)
+// =========================================================================
 async function renderFinalVideo() {
   const statusContainer = document.getElementById('status-container');
   const errorContainer = document.getElementById('error-container');
@@ -512,9 +514,18 @@ async function renderFinalVideo() {
   errorContainer.classList.add('hidden');
 
   const statusText = statusContainer.querySelector('p') || statusContainer;
-  statusText.textContent = 'Rendering video on server... Please wait.';
+  statusText.textContent = 'Initializing server render job...';
+
+  // Gather current style settings from the DOM inputs
+  const currentStyles = {
+    fontFamily: document.getElementById('fontFamily')?.value || 'Montserrat',
+    fontSize: parseInt(document.getElementById('fontSize')?.value) || 52,
+    textColor: document.getElementById('textColor')?.value || '#FFFFFF',
+    outlineColor: document.getElementById('outlineColor')?.value || '#000000'
+  };
 
   try {
+    // 1. Send initial render request to start background task
     const response = await fetch(`${BACKEND_URL}/api/export`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -522,25 +533,51 @@ async function renderFinalVideo() {
         jobId: currentSession.jobId,
         mediaPath: currentSession.mediaPath,
         bgPath: currentSession.bgPath,
-        subtitles: currentSession.subtitles
+        subtitles: currentSession.subtitles,
+        styles: currentStyles
       })
     });
 
     const data = await response.json();
-    if (!response.ok || !data.success) {
-      throw new Error(data.error || 'Server rendering failed.');
+    if (!response.ok || !data.success || !data.jobId) {
+      throw new Error(data.error || 'Failed to start export job on server.');
     }
 
-    const fullDownloadUrl = getFullUrl(data.downloadUrl);
-    document.getElementById('output-video').src = fullDownloadUrl;
+    const jobId = data.jobId;
+    statusText.textContent = 'Rendering video on server... Please wait (FFmpeg encoding in progress)';
 
-    const downloadBtn = document.getElementById('download-btn');
-    downloadBtn.href = fullDownloadUrl;
-    downloadBtn.download = `lyric_studio_export_${Date.now()}.mp4`;
+    // 2. Poll server every 3 seconds for export status
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`${BACKEND_URL}/api/status/${jobId}`);
+        if (!statusRes.ok) return;
 
-    statusContainer.classList.add('hidden');
-    step2.classList.add('hidden');
-    resultContainer.classList.remove('hidden');
+        const statusData = await statusRes.json();
+
+        if (statusData.status === 'completed') {
+          clearInterval(pollInterval);
+
+          const fullDownloadUrl = getFullUrl(statusData.downloadUrl);
+          document.getElementById('output-video').src = fullDownloadUrl;
+
+          const downloadBtn = document.getElementById('download-btn');
+          downloadBtn.href = fullDownloadUrl;
+          downloadBtn.download = `lyric_studio_export_${Date.now()}.mp4`;
+
+          statusContainer.classList.add('hidden');
+          step2.classList.add('hidden');
+          resultContainer.classList.remove('hidden');
+
+        } else if (statusData.status === 'failed') {
+          clearInterval(pollInterval);
+          statusContainer.classList.add('hidden');
+          errorContainer.textContent = `Export Failed: ${statusData.error || 'Encoding process failed.'}`;
+          errorContainer.classList.remove('hidden');
+        }
+      } catch (pollErr) {
+        console.error('Error during status poll:', pollErr);
+      }
+    }, 3000);
 
   } catch (err) {
     statusContainer.classList.add('hidden');

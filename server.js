@@ -40,7 +40,7 @@ app.use(express.static(PUBLIC_DIR));
 app.use('/outputs', express.static(OUTPUTS_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// Automatic storage cleanup for disk/memory management
+// Automatic storage cleanup for disk files
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const FILE_MAX_AGE_MS = 60 * 60 * 1000;
 
@@ -219,12 +219,22 @@ app.post('/api/transcribe', upload.fields([
 // In-Memory Asynchronous Job Tracker
 const exportJobs = new Map();
 
+// Periodic Job Tracker Memory Cleanup (Removes records > 1 hour old)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of exportJobs.entries()) {
+    if (job.timestamp && (now - job.timestamp > 60 * 60 * 1000)) {
+      exportJobs.delete(id);
+    }
+  }
+}, 15 * 60 * 1000);
+
 async function processVideoBackground(jobId, exportParams) {
   try {
     const { mediaPath, bgPath, subtitles, styles } = exportParams;
 
     if (!mediaPath || !fs.existsSync(mediaPath)) {
-      exportJobs.set(jobId, { status: 'failed', error: 'Source media file not found on server.' });
+      exportJobs.set(jobId, { status: 'failed', error: 'Source media file not found on server.', timestamp: Date.now() });
       return;
     }
 
@@ -298,18 +308,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     }
 
     await execPromise(ffmpegCmd, { maxBuffer: 1024 * 1024 * 50 });
-    exportJobs.set(jobId, { status: 'completed', downloadUrl: `/outputs/${outputFilename}` });
+    exportJobs.set(jobId, { status: 'completed', downloadUrl: `/outputs/${outputFilename}`, timestamp: Date.now() });
 
   } catch (error) {
     console.error(`Background Export Error for ${jobId}:`, error);
-    exportJobs.set(jobId, { status: 'failed', error: error.message });
+    exportJobs.set(jobId, { status: 'failed', error: error.message, timestamp: Date.now() });
   }
 }
 
 // Initiate Non-Blocking Export Task
 function handleVideoRender(req, res) {
   const jobId = `export_${Date.now()}`;
-  exportJobs.set(jobId, { status: 'processing' });
+  exportJobs.set(jobId, { status: 'processing', timestamp: Date.now() });
 
   // Execute processing asynchronously in background
   processVideoBackground(jobId, req.body);
