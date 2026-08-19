@@ -148,9 +148,10 @@ app.post('/api/transcribe', upload.fields([
       return res.status(400).json({ success: false, error: 'No media input provided.' });
     }
 
+    // Fast Groq Whisper Turbo transcription model
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(mediaFilePath),
-      model: "whisper-large-v3",
+      model: "whisper-large-v3-turbo",
       response_format: "verbose_json",
       timestamp_granularities: ["segment", "word"]
     });
@@ -183,7 +184,7 @@ app.post('/api/transcribe', upload.fields([
   }
 });
 
-// Shared Rendering Handler function
+// Video Rendering Logic
 async function handleVideoRender(req, res) {
   try {
     const { jobId, mediaPath, bgPath, subtitles, styles } = req.body;
@@ -251,7 +252,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const mediaExt = path.extname(mediaPath).toLowerCase();
     const isAudioOnly = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mpeg'].includes(mediaExt);
 
-    // Optimized FFmpeg Flags (-threads 1 -preset ultrafast -crf 28) for maximum memory efficiency on 512MB RAM free instances
     if (isAudioOnly) {
       if (bgPath && fs.existsSync(bgPath)) {
         const bgExt = path.extname(bgPath).toLowerCase();
@@ -278,7 +278,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   }
 }
 
-// Bind rendering logic to both /api/export and /api/render
+// Bind rendering logic to both endpoints
 app.post('/api/export', handleVideoRender);
 app.post('/api/render', handleVideoRender);
 
@@ -286,6 +286,5 @@ const server = app.listen(PORT, () => {
   console.log(`🚀 Professional Lyric Studio running on http://localhost:${PORT}`);
 });
 
-// Extend socket timeout settings for video processing
 server.keepAliveTimeout = 300000;
 server.headersTimeout = 305000;
