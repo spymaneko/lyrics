@@ -1,4 +1,4 @@
-const BACKEND_URL = 'https://lyric-studio-backend.onrender.com';
+const BACKEND_URL = 'https://lyric-studio-backend.onrender.com'; //
 
 // Helper function to turn relative backend paths into full absolute URLs
 const getFullUrl = (url) => {
@@ -76,14 +76,18 @@ function splitLongSegments(segments, maxWords = 4) {
   return result;
 }
 
-function switchTab(tab) {
+function switchTab(tab, evt) {
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
 
-  if (event && event.target) {
-    event.target.classList.add('active');
+  if (evt && evt.target) {
+    evt.target.classList.add('active');
+  } else if (window.event && window.event.target) {
+    window.event.target.classList.add('active');
   }
-  document.getElementById(`${tab}-form`).classList.add('active');
+  
+  const targetForm = document.getElementById(`${tab}-form`);
+  if (targetForm) targetForm.classList.add('active');
 }
 
 async function startTranscribe(event, type) {
@@ -153,11 +157,11 @@ function initStudioCanvas(mediaUrl, bgUrl) {
 
     if (isVideoBg) {
       bgVideoEl = document.createElement('video');
+      bgVideoEl.crossOrigin = 'anonymous';
       bgVideoEl.src = bgUrl;
       bgVideoEl.muted = true;
       bgVideoEl.loop = true;
       bgVideoEl.playsInline = true;
-      bgVideoEl.crossOrigin = 'anonymous';
       bgVideoEl.play();
     } else {
       bgImgEl = new Image();
@@ -417,7 +421,8 @@ function splitCurrentLyric() {
 
 function handleKeyPress(e) {
   if (e.key === 's' || e.key === 'S') {
-    if (document.activeElement.tagName !== 'INPUT') {
+    const activeTag = document.activeElement.tagName;
+    if (activeTag !== 'INPUT' && activeTag !== 'TEXTAREA') {
       splitCurrentLyric();
     }
   }
@@ -437,7 +442,10 @@ function togglePlay() {
 }
 
 function seekVideo(time) {
-  if (videoEl) videoEl.currentTime = parseFloat(time);
+  if (videoEl) {
+    videoEl.currentTime = parseFloat(time);
+    if (bgVideoEl) bgVideoEl.currentTime = parseFloat(time);
+  }
 }
 
 function updateTimeDisplay() {
@@ -497,6 +505,7 @@ function highlightActiveLyricRow() {
     const activeRow = document.getElementById(`lyric-row-${index}`);
     if (activeRow) {
       activeRow.classList.add('active');
+      activeRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }
 }
@@ -519,16 +528,18 @@ async function renderFinalVideo() {
     // 2. Capture real-time canvas stream (30 FPS)
     const stream = canvasEl.captureStream(30);
 
-    // 3. Attach audio track from original video or audio source
-    let audioTrack;
-    if (videoEl.captureStream) {
-      audioTrack = videoEl.captureStream().getAudioTracks()[0];
-    } else if (videoEl.mozCaptureStream) {
-      audioTrack = videoEl.mozCaptureStream().getAudioTracks()[0];
-    }
-
-    if (audioTrack) {
-      stream.addTrack(audioTrack);
+    // 3. Audio Node routing via Web Audio API for safe cross-domain stream capture
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaElementSource(videoEl);
+      const dest = audioCtx.createMediaStreamDestination();
+      source.connect(dest);
+      source.connect(audioCtx.destination);
+      
+      const audioTrack = dest.stream.getAudioTracks()[0];
+      if (audioTrack) stream.addTrack(audioTrack);
+    } catch (aErr) {
+      console.warn('Fallback audio capture:', aErr.message);
     }
 
     // 4. Select standard web video container format
