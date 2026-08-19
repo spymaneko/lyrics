@@ -109,14 +109,13 @@ app.post('/api/transcribe', upload.fields([
       return res.status(400).json({ success: false, error: 'No media input provided.' });
     }
 
-    // OpenAI Whisper API Transcription
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(mediaFilePath),
-      model: "whisper-1",
-      response_format: "verbose_json",
-      timestamp_granularities: ["segment", "word"]
-    });
-
+    // New Groq Transcription call:
+const transcription = await openai.audio.transcriptions.create({
+  file: fs.createReadStream(mediaFilePath),
+  model: "whisper-large-v3",
+  response_format: "verbose_json",
+  timestamp_granularities: ["segment", "word"]
+});
     const allWords = transcription.words || [];
 
     const segments = (transcription.segments || []).map(seg => {
