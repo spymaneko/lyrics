@@ -496,18 +496,9 @@ function renderLyricsList() {
   });
 }
 
+// Kept empty so playback no longer applies highlight borders or forces auto-scrolling
 function highlightActiveLyricRow() {
-  const currentTime = videoEl.currentTime;
-  const index = getActiveSubtitleAtTime(currentTime);
-
-  document.querySelectorAll('.lyric-row').forEach(r => r.classList.remove('active'));
-  if (index !== -1) {
-    const activeRow = document.getElementById(`lyric-row-${index}`);
-    if (activeRow) {
-      activeRow.classList.add('active');
-      activeRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-  }
+  // Static display mode active
 }
 
 // Server-Side Export Request (Sends layout state to backend FFmpeg renderer)
