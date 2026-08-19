@@ -1,6 +1,6 @@
 {
+  "framework": null,
   "outputDirectory": "public",
   "buildCommand": null,
-  "devCommand": null,
-  "installCommand": "echo 'Skipping install on Vercel'"
+  "installCommand": "echo 'Skipping install'"
 }
