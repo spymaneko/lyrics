@@ -1,5 +1,11 @@
 const BACKEND_URL = 'https://lyric-studio-backend.onrender.com';
 
+// Helper function to turn relative backend paths into full absolute URLs
+const getFullUrl = (url) => {
+  if (!url) return null;
+  return url.startsWith('http') ? url : `${BACKEND_URL}${url}`;
+};
+
 let currentSession = {
   jobId: null,
   mediaPath: null,
@@ -113,14 +119,14 @@ async function startTranscribe(event, type) {
       jobId: result.jobId,
       mediaPath: result.mediaPath,
       bgPath: result.bgPath,
-      bgUrl: result.bgUrl,
+      bgUrl: getFullUrl(result.bgUrl),
       subtitles: processedSubtitles
     };
 
     step1.classList.add('hidden');
     step2.classList.remove('hidden');
 
-    initStudioCanvas(result.mediaUrl, result.bgUrl);
+    initStudioCanvas(getFullUrl(result.mediaUrl), getFullUrl(result.bgUrl));
     renderLyricsList();
   } catch (err) {
     errorContainer.textContent = err.message;
@@ -140,7 +146,7 @@ function initStudioCanvas(mediaUrl, bgUrl) {
 
   // Detect if background is a Video or Image
   if (bgUrl) {
-    const ext = bgUrl.split('.').pop().toLowerCase();
+    const ext = bgUrl.split('?')[0].split('.').pop().toLowerCase();
     const isVideoBg = ['mp4', 'webm', 'mov', 'avi', 'mkv'].includes(ext);
 
     if (isVideoBg) {
@@ -522,8 +528,9 @@ async function renderFinalVideo() {
     const result = await response.json();
     if (!response.ok || !result.success) throw new Error(result.error || 'Video render failed.');
 
-    document.getElementById('output-video').src = result.downloadUrl;
-    document.getElementById('download-btn').href = result.downloadUrl;
+    const downloadUrl = getFullUrl(result.downloadUrl);
+    document.getElementById('output-video').src = downloadUrl;
+    document.getElementById('download-btn').href = downloadUrl;
 
     step2.classList.add('hidden');
     resultContainer.classList.remove('hidden');
