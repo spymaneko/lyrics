@@ -41,6 +41,38 @@ app.use(express.static(PUBLIC_DIR));
 app.use('/outputs', express.static(OUTPUTS_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
+// Automatic storage cleanup for Render free tier memory & disk limits
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const FILE_MAX_AGE_MS = 60 * 60 * 1000;      // 1 hour
+
+async function cleanOldFiles(dirPath) {
+  try {
+    const files = await fs.readdir(dirPath);
+    const now = Date.now();
+
+    for (const file of files) {
+      const filePath = path.join(dirPath, file);
+      const stats = await fs.stat(filePath);
+
+      if (now - stats.mtimeMs > FILE_MAX_AGE_MS) {
+        await fs.remove(filePath);
+      }
+    }
+  } catch (err) {
+    console.error(`Cleanup error in ${dirPath}:`, err.message);
+  }
+}
+
+setInterval(() => {
+  cleanOldFiles(UPLOADS_DIR);
+  cleanOldFiles(OUTPUTS_DIR);
+}, CLEANUP_INTERVAL_MS);
+
+// Health check endpoint to wake up Render instance
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: Date.now() });
+});
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
   filename: (req, file, cb) => {
@@ -218,22 +250,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const mediaExt = path.extname(mediaPath).toLowerCase();
     const isAudioOnly = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mpeg'].includes(mediaExt);
 
-    // Optimized FFmpeg Flags (-threads 2 -preset superfast -crf 22) to prevent OOM RAM Crashes on Render Free Tier
+    // Optimized FFmpeg Flags (-threads 1 -preset ultrafast -crf 28) for maximum memory efficiency on 512MB RAM free instances
     if (isAudioOnly) {
       if (bgPath && fs.existsSync(bgPath)) {
         const bgExt = path.extname(bgPath).toLowerCase();
         const isBgVideo = ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(bgExt);
 
         if (isBgVideo) {
-          ffmpegCmd = `ffmpeg -threads 2 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset superfast -crf 22 -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 1 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         } else {
-          ffmpegCmd = `ffmpeg -threads 2 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset superfast -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -threads 1 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         }
       } else {
-        ffmpegCmd = `ffmpeg -threads 2 -f lavfi -i color=c=black:s=1280x720:r=30 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset superfast -c:a aac -b:a 192k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+        ffmpegCmd = `ffmpeg -threads 1 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
       }
     } else {
-      ffmpegCmd = `ffmpeg -threads 2 -i "${mediaPath}" -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset superfast -crf 22 -c:a copy "${outputPath}" -y`;
+      ffmpegCmd = `ffmpeg -threads 1 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -crf 28 -c:a copy "${outputPath}" -y`;
     }
 
     await execPromise(ffmpegCmd);
@@ -249,6 +281,6 @@ const server = app.listen(PORT, () => {
   console.log(`🚀 Professional Lyric Studio running on http://localhost:${PORT}`);
 });
 
-// Extend socket timeout settings for long video renders
+// Extend socket timeout settings for video processing
 server.keepAliveTimeout = 300000;
 server.headersTimeout = 305000;

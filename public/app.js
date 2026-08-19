@@ -80,7 +80,9 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
 
-  event.target.classList.add('active');
+  if (event && event.target) {
+    event.target.classList.add('active');
+  }
   document.getElementById(`${tab}-form`).classList.add('active');
 }
 
@@ -155,13 +157,16 @@ function initStudioCanvas(mediaUrl, bgUrl) {
       bgVideoEl.muted = true;
       bgVideoEl.loop = true;
       bgVideoEl.playsInline = true;
+      bgVideoEl.crossOrigin = 'anonymous';
       bgVideoEl.play();
     } else {
       bgImgEl = new Image();
+      bgImgEl.crossOrigin = 'anonymous';
       bgImgEl.src = bgUrl;
     }
   }
 
+  videoEl.crossOrigin = 'anonymous';
   videoEl.src = mediaUrl;
   videoEl.load();
 
@@ -297,16 +302,11 @@ function renderCanvasLoop() {
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, canvasEl.width, canvasEl.height);
 
-    // 1. Prioritize background video if active
     if (bgVideoEl && bgVideoEl.readyState >= 2) {
       ctx.drawImage(bgVideoEl, 0, 0, canvasEl.width, canvasEl.height);
-    } 
-    // 2. Otherwise draw background photo if active
-    else if (bgImgEl && bgImgEl.complete && bgImgEl.naturalWidth !== 0) {
+    } else if (bgImgEl && bgImgEl.complete && bgImgEl.naturalWidth !== 0) {
       ctx.drawImage(bgImgEl, 0, 0, canvasEl.width, canvasEl.height);
-    } 
-    // 3. Fallback to main video file frames
-    else if (videoEl.readyState >= 2) {
+    } else if (videoEl.readyState >= 2) {
       ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
     }
 
@@ -501,6 +501,7 @@ function highlightActiveLyricRow() {
   }
 }
 
+// Client-Side Canvas Stream Recording (Prevents Render FFmpeg Timeouts / OOM Crashes)
 async function renderFinalVideo() {
   const statusContainer = document.getElementById('status-container');
   const errorContainer = document.getElementById('error-container');
@@ -510,52 +511,73 @@ async function renderFinalVideo() {
   statusContainer.classList.remove('hidden');
   errorContainer.classList.add('hidden');
 
-  // Verify session integrity before sending payload
-  if (!currentSession.mediaPath || !currentSession.subtitles || currentSession.subtitles.length === 0) {
-    statusContainer.classList.add('hidden');
-    errorContainer.textContent = 'Session data missing. Please re-transcribe your track.';
-    errorContainer.classList.remove('hidden');
-    return;
-  }
-
-  const styles = {
-    fontFamily: document.getElementById('fontFamily').value,
-    fontSize: parseInt(document.getElementById('fontSize').value),
-    transition: document.getElementById('transition').value,
-    textColor: document.getElementById('textColor').value,
-    outlineColor: document.getElementById('outlineColor').value
-  };
-
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5-minute timeout window
+    // 1. Reset video & background timeline to 0
+    videoEl.currentTime = 0;
+    if (bgVideoEl) bgVideoEl.currentTime = 0;
 
-    const response = await fetch(`${BACKEND_URL}/api/render`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...currentSession, styles }),
-      signal: controller.signal
+    // 2. Capture real-time canvas stream (30 FPS)
+    const stream = canvasEl.captureStream(30);
+
+    // 3. Attach audio track from original video or audio source
+    let audioTrack;
+    if (videoEl.captureStream) {
+      audioTrack = videoEl.captureStream().getAudioTracks()[0];
+    } else if (videoEl.mozCaptureStream) {
+      audioTrack = videoEl.mozCaptureStream().getAudioTracks()[0];
+    }
+
+    if (audioTrack) {
+      stream.addTrack(audioTrack);
+    }
+
+    // 4. Select standard web video container format
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+      ? 'video/webm;codecs=vp9,opus'
+      : 'video/webm';
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: 6000000 // High-definition 6 Mbps output
     });
 
-    clearTimeout(timeoutId);
+    const recordedChunks = [];
 
-    const result = await response.json();
-    if (!response.ok || !result.success) throw new Error(result.error || 'Video render failed.');
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        recordedChunks.push(e.data);
+      }
+    };
 
-    const downloadUrl = getFullUrl(result.downloadUrl);
-    document.getElementById('output-video').src = downloadUrl;
-    document.getElementById('download-btn').href = downloadUrl;
+    recorder.onstop = () => {
+      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      const exportUrl = URL.createObjectURL(blob);
 
-    step2.classList.add('hidden');
-    resultContainer.classList.remove('hidden');
+      document.getElementById('output-video').src = exportUrl;
+      const downloadBtn = document.getElementById('download-btn');
+      downloadBtn.href = exportUrl;
+      downloadBtn.download = `lyric_studio_export_${Date.now()}.webm`;
+
+      statusContainer.classList.add('hidden');
+      step2.classList.add('hidden');
+      resultContainer.classList.remove('hidden');
+    };
+
+    // 5. Start real-time stream recording
+    recorder.start();
+    await videoEl.play();
+    if (bgVideoEl) await bgVideoEl.play();
+
+    // 6. Stop recording automatically when video finishes playback
+    videoEl.onended = () => {
+      if (recorder.state !== 'inactive') {
+        recorder.stop();
+      }
+    };
+
   } catch (err) {
-    if (err.name === 'AbortError') {
-      errorContainer.textContent = 'Render request timed out. Processing heavy videos on free servers takes longer—try again or use a shorter clip.';
-    } else {
-      errorContainer.textContent = `Render Connection Failed (${err.message}). Ensure your Render backend service is awake.`;
-    }
-    errorContainer.classList.remove('hidden');
-  } finally {
     statusContainer.classList.add('hidden');
+    errorContainer.textContent = `Client-side Export Error: ${err.message}`;
+    errorContainer.classList.remove('hidden');
   }
 }
