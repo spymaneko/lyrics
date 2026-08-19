@@ -28,7 +28,6 @@ await fs.ensureDir(UPLOADS_DIR);
 await fs.ensureDir(OUTPUTS_DIR);
 await fs.ensureDir(PUBLIC_DIR);
 
-// Robust CORS Configuration
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -41,9 +40,8 @@ app.use(express.static(PUBLIC_DIR));
 app.use('/outputs', express.static(OUTPUTS_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// Automatic storage cleanup for Render free tier memory & disk limits
-const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const FILE_MAX_AGE_MS = 60 * 60 * 1000;      // 1 hour
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const FILE_MAX_AGE_MS = 60 * 60 * 1000;
 
 async function cleanOldFiles(dirPath) {
   try {
@@ -68,7 +66,6 @@ setInterval(() => {
   cleanOldFiles(OUTPUTS_DIR);
 }, CLEANUP_INTERVAL_MS);
 
-// Health check endpoint to wake up Render instance
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: Date.now() });
 });
@@ -104,7 +101,6 @@ function formatASSTime(seconds) {
   return `${hours}:${minutes}:${secs}.${cs}`;
 }
 
-// Merges fragmented Whisper timestamps into single fixed lyric sentences
 function combineIntoFixedLines(rawSegments) {
   if (!rawSegments || rawSegments.length === 0) return [];
 
@@ -125,7 +121,6 @@ function combineIntoFixedLines(rawSegments) {
       const timeGap = seg.start - current.end;
       const combinedLength = current.text.length + 1 + text.length;
 
-      // Group segments if pause is short (< 1.2s) and line length stays under 50 chars
       if (timeGap < 1.2 && combinedLength <= 50) {
         current.end = seg.end;
         current.text += ` ${text}`;
@@ -148,7 +143,7 @@ function combineIntoFixedLines(rawSegments) {
     text: line.text,
     x: 640,
     y: 640,
-    words: [] // Keep empty to prevent word-by-word highlight triggers
+    words: []
   }));
 }
 
@@ -220,7 +215,6 @@ app.post('/api/transcribe', upload.fields([
   }
 });
 
-// Optimized Fast Video Rendering Logic
 async function handleVideoRender(req, res) {
   try {
     const { jobId, mediaPath, bgPath, subtitles, styles } = req.body;
@@ -279,22 +273,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const mediaExt = path.extname(mediaPath).toLowerCase();
     const isAudioOnly = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mpeg'].includes(mediaExt);
 
-    // Speed-Optimized FFmpeg Flags (-threads 0, -preset ultrafast, -tune fastdecode)
     if (isAudioOnly) {
       if (bgPath && fs.existsSync(bgPath)) {
         const bgExt = path.extname(bgPath).toLowerCase();
         const isBgVideo = ['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(bgExt);
 
         if (isBgVideo) {
-          ffmpegCmd = `ffmpeg -threads 0 -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune fastdecode -crf 30 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -stream_loop -1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         } else {
-          ffmpegCmd = `ffmpeg -threads 0 -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=854:480:force_original_aspect_ratio=increase,crop=854:480,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -crf 30 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+          ffmpegCmd = `ffmpeg -loop 1 -i "${bgPath}" -i "${mediaPath}" -filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune stillimage -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
         }
       } else {
-        ffmpegCmd = `ffmpeg -threads 0 -f lavfi -i color=c=black:s=854x480:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -tune fastdecode -crf 30 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
+        ffmpegCmd = `ffmpeg -f lavfi -i color=c=black:s=1280x720:r=24 -i "${mediaPath}" -filter_complex "[0:v]ass='${escapedAssPath}'[v]" -map "[v]" -map 1:a:0 -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 128k -pix_fmt yuv420p -shortest "${outputPath}" -y`;
       }
     } else {
-      ffmpegCmd = `ffmpeg -threads 0 -i "${mediaPath}" -vf "scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-ih)/2:(oh-ih)/2,ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -tune fastdecode -crf 30 -c:a copy "${outputPath}" -y`;
+      ffmpegCmd = `ffmpeg -i "${mediaPath}" -vf "ass='${escapedAssPath}'" -c:v libx264 -preset ultrafast -crf 28 -c:a copy "${outputPath}" -y`;
     }
 
     await execPromise(ffmpegCmd);
